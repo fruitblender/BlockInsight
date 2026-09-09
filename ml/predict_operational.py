@@ -21,7 +21,7 @@ except Exception:
 
 # Add ingestion directory to path for database connection
 sys.path.append(str(Path(__file__).resolve().parents[1] / "ingestion"))
-from database import get_connection
+from database import get_connection, initialize_database
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
@@ -31,6 +31,7 @@ def run_operational_inference(batch_id: int = 1, alert_threshold: float = 65.0) 
     print(f"   OPERATIONAL INFERENCE ENGINE - BATCH #{batch_id}")
     print("============================================================\n")
 
+    initialize_database()
     conn = get_connection()
     cur = conn.cursor()
 
