@@ -24,6 +24,7 @@ input-address, or output-address data.
 """
 
 import json
+from decimal import Decimal
 import sys
 from pathlib import Path
 
@@ -61,6 +62,25 @@ def add_node(graph, entity_id, entity_type, **attributes):
             if value is not None:
                 graph.nodes[entity_id][key] = value
 
+
+
+def make_graphml_safe(graph):
+    """Convert unsupported values before GraphML export."""
+    for _, attrs in graph.nodes(data=True):
+        for key, value in list(attrs.items()):
+            if isinstance(value, Decimal):
+                attrs[key] = float(value)
+            elif value is not None and not isinstance(value, (str, int, float, bool)):
+                attrs[key] = str(value)
+
+    for _, _, attrs in graph.edges(data=True):
+        for key, value in list(attrs.items()):
+            if isinstance(value, Decimal):
+                attrs[key] = float(value)
+            elif value is not None and not isinstance(value, (str, int, float, bool)):
+                attrs[key] = str(value)
+
+    return graph
 
 def build_graph():
 
@@ -686,7 +706,141 @@ def build_graph():
 
     print()
 
-    # ================================================================
+    # ------------------------------------------------------------
+    # Graph centrality metrics and communities
+    # ------------------------------------------------------------
+
+    degree_centrality = {}
+    betweenness_centrality = {}
+    closeness_centrality = {}
+    community_map = {}
+
+    if graph.number_of_nodes() > 1:
+
+        print()
+        print("  Calculating graph centrality metrics...")
+
+        degree_centrality = nx.degree_centrality(
+            undirected_graph
+        )
+
+        betweenness_centrality = nx.betweenness_centrality(
+            undirected_graph,
+            normalized=True
+        )
+
+        closeness_centrality = nx.closeness_centrality(
+            undirected_graph
+        )
+
+        print("  Detecting graph communities...")
+
+        communities = list(
+            nx.community.greedy_modularity_communities(
+                undirected_graph
+            )
+        )
+
+        for community_id, members in enumerate(communities):
+            for entity_id in members:
+                community_map[entity_id] = community_id
+
+        print(
+            f"  Communities detected  : "
+            f"{len(communities)}"
+        )
+
+        top_centrality = sorted(
+            degree_centrality.items(),
+            key=lambda item: item[1],
+            reverse=True
+        )[:5]
+
+        print()
+        print(
+            "  Top 5 degree-centrality entities:"
+        )
+
+        for entity, score in top_centrality:
+
+            print(
+                f"    {entity:35s} "
+                f"{score:.6f}"
+            )
+
+    # ------------------------------------------------------------
+    # Persist graph metrics for network nodes
+    # ------------------------------------------------------------
+
+    print()
+    print("--- Persisting Graph Metrics to analytics.node_features ---")
+
+    graph_metric_rows = 0
+
+    update_metrics_sql = """
+        UPDATE analytics.node_features
+        SET
+            degree_centrality = %s,
+            betweenness_centrality = %s,
+            closeness_centrality = %s,
+            community_id = %s
+        WHERE batch_id = %s
+          AND node_id = %s;
+    """
+
+    for entity_id, attrs in graph.nodes(data=True):
+
+        if attrs.get("entity_type") != "NODE":
+            continue
+
+        if not entity_id.startswith("node:"):
+            continue
+
+        node_id = entity_id.split(
+            "node:",
+            1
+        )[1]
+
+        cur.execute(
+            update_metrics_sql,
+            (
+                float(
+                    degree_centrality.get(
+                        entity_id,
+                        0.0
+                    )
+                ),
+                float(
+                    betweenness_centrality.get(
+                        entity_id,
+                        0.0
+                    )
+                ),
+                float(
+                    closeness_centrality.get(
+                        entity_id,
+                        0.0
+                    )
+                ),
+                int(
+                    community_map.get(
+                        entity_id,
+                        -1
+                    )
+                ),
+                1,
+                node_id
+            )
+        )
+
+        graph_metric_rows += cur.rowcount
+
+    conn.commit()
+
+    print(
+        f"  Node graph metrics persisted: "
+        f"{graph_metric_rows}"
+    )    # ================================================================
     # 7. SAVE GRAPH ARTIFACTS
     # ================================================================
 
@@ -695,6 +849,8 @@ def build_graph():
     # ------------------------------------------------------------
     # GraphML
     # ------------------------------------------------------------
+
+    make_graphml_safe(graph)
 
     nx.write_graphml(
         graph,
@@ -756,6 +912,11 @@ def build_graph():
 
     return graph
 
+
+
+# Backward-compatible wrapper used by the pipeline
+def build_and_export_graph():
+    return build_graph()
 
 if __name__ == "__main__":
     build_graph()

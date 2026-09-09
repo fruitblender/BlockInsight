@@ -15,6 +15,7 @@ def load_nodes():
         # 1. Ensure ingestion batch exists
         # --------------------------------------------------
         batch_id = BATCH_ID
+
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -23,9 +24,16 @@ def load_nodes():
                 VALUES
                     (%s, %s, %s, %s)
                 ON CONFLICT (batch_id) DO UPDATE
-                SET status = 'PROCESSING', started_at = CURRENT_TIMESTAMP;
+                SET
+                    status = 'PROCESSING',
+                    started_at = CURRENT_TIMESTAMP;
                 """,
-                (batch_id, "nodes", "nodes.csv", "PROCESSING")
+                (
+                    batch_id,
+                    "nodes",
+                    "nodes.csv",
+                    "PROCESSING"
+                )
             )
 
         print(f"Using batch: {batch_id}")
@@ -33,7 +41,13 @@ def load_nodes():
         # --------------------------------------------------
         # 2. Read CSV
         # --------------------------------------------------
-        with open(CSV_FILE, "r", newline="", encoding="utf-8") as file:
+        with open(
+            CSV_FILE,
+            "r",
+            newline="",
+            encoding="utf-8"
+        ) as file:
+
             reader = csv.DictReader(file)
 
             rows = [
@@ -55,25 +69,35 @@ def load_nodes():
         # 3. Insert into staging
         # --------------------------------------------------
         with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO staging.nodes_raw
-                (
-                    node_id,
-                    ip,
-                    port,
-                    country,
-                    asn,
-                    node_type,
-                    first_seen,
-                    last_seen,
-                    batch_id
+
+            inserted_count = 0
+
+            for row in rows:
+
+                cur.execute(
+                    """
+                    INSERT INTO staging.nodes_raw
+                    (
+                        node_id,
+                        ip,
+                        port,
+                        country,
+                        asn,
+                        node_type,
+                        first_seen,
+                        last_seen,
+                        batch_id
+                    )
+                    VALUES
+                    (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+
+                    ON CONFLICT (node_id) DO NOTHING;
+                    """,
+                    row
                 )
-                VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s, %s);
-                """,
-                rows
-            )
+
+                if cur.rowcount > 0:
+                    inserted_count += 1
 
             # --------------------------------------------------
             # 4. Mark batch completed
@@ -87,12 +111,24 @@ def load_nodes():
                     row_count = %s
                 WHERE batch_id = %s;
                 """,
-                (len(rows), batch_id)
+                (
+                    inserted_count,
+                    batch_id
+                )
             )
 
         conn.commit()
 
-        print(f"Successfully loaded {len(rows)} nodes.")
+        skipped_count = len(rows) - inserted_count
+
+        print(
+            f"Successfully loaded {inserted_count} new nodes."
+        )
+
+        print(
+            f"Skipped {skipped_count} existing nodes."
+        )
+
         print(f"Batch {batch_id} completed.")
 
     except Exception as e:

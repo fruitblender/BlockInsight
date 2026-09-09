@@ -13,6 +13,7 @@ def load_bitcoin_transactions():
 
         # Register file under Batch 1
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 INSERT INTO ingestion_files
@@ -35,11 +36,18 @@ def load_bitcoin_transactions():
         print(f"Using batch: {BATCH_ID}")
 
         # Read JSON
-        with open(JSON_FILE, "r", encoding="utf-8") as file:
+        with open(
+            JSON_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
             transactions = json.load(file)
 
         if not isinstance(transactions, list):
-            raise ValueError("Expected JSON file to contain a list.")
+            raise ValueError(
+                "Expected JSON file to contain a list."
+            )
 
         rows = [
             (
@@ -60,27 +68,40 @@ def load_bitcoin_transactions():
 
         # Insert into staging
         with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO staging.bitcoin_transactions_raw
-                (
-                    txid,
-                    timestamp,
-                    inputs,
-                    outputs,
-                    fee,
-                    size,
-                    ratio_fee_size,
-                    rarity_score,
-                    tema,
-                    description_ia,
-                    batch_id
+
+            inserted_count = 0
+
+            for row in rows:
+
+                cur.execute(
+                    """
+                    INSERT INTO staging.bitcoin_transactions_raw
+                    (
+                        txid,
+                        timestamp,
+                        inputs,
+                        outputs,
+                        fee,
+                        size,
+                        ratio_fee_size,
+                        rarity_score,
+                        tema,
+                        description_ia,
+                        batch_id
+                    )
+                    VALUES
+                    (
+                        %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s
+                    )
+
+                    ON CONFLICT (txid) DO NOTHING;
+                    """,
+                    row
                 )
-                VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-                """,
-                rows
-            )
+
+                if cur.rowcount > 0:
+                    inserted_count += 1
 
             # Mark file completed
             cur.execute(
@@ -92,12 +113,26 @@ def load_bitcoin_transactions():
                     row_count = %s
                 WHERE file_id = %s;
                 """,
-                (len(rows), file_id)
+                (
+                    inserted_count,
+                    file_id
+                )
             )
 
         conn.commit()
 
-        print(f"Successfully loaded {len(rows)} Bitcoin transactions.")
+        skipped_count = len(rows) - inserted_count
+
+        print(
+            f"Successfully loaded "
+            f"{inserted_count} new Bitcoin transactions."
+        )
+
+        print(
+            f"Skipped "
+            f"{skipped_count} existing Bitcoin transactions."
+        )
+
         print(f"File completed under batch {BATCH_ID}.")
 
     except Exception as e:

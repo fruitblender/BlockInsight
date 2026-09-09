@@ -85,10 +85,10 @@ def get_overview():
     prop_stats = cur.fetchone()
 
     # Cluster / Community counts
-    cur.execute("SELECT COUNT(DISTINCT community_id) FROM analytics.node_graph_metrics WHERE batch_id = %s;", (BATCH_ID,))
+    cur.execute("SELECT COUNT(DISTINCT community_id) FROM analytics.node_features WHERE batch_id = %s;", (BATCH_ID,))
     comm_count = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(DISTINCT cluster_id) FROM analytics.node_clusters WHERE batch_id = %s AND cluster_id != -1;", (BATCH_ID,))
+    cur.execute("SELECT COUNT(DISTINCT community_id) FROM analytics.node_features WHERE batch_id = %s AND community_id >= 0;", (BATCH_ID,))
     cluster_count = cur.fetchone()[0]
 
     cur.close()
@@ -224,13 +224,11 @@ def get_nodes(limit: int = 150, offset: int = 0):
             COALESCE(nrs.risk_score, 0.0) AS risk_score,
             COALESCE(nrs.confidence, 0.0) AS confidence,
             COALESCE(nrs.risk_level, 'LOW') AS risk_level,
-            COALESCE(nc.cluster_id, 0) AS cluster_id,
-            COALESCE(ngm.community_id, 0) AS community_id,
-            COALESCE(ngm.degree_centrality, 0.0) AS degree_centrality
+            COALESCE(nf.community_id, 0) AS cluster_id,
+            COALESCE(nf.community_id, 0) AS community_id,
+            COALESCE(nf.degree_centrality, 0.0) AS degree_centrality
         FROM analytics.node_features nf
         LEFT JOIN analytics.node_risk_scores nrs ON nf.node_id = nrs.node_id AND nf.batch_id = nrs.batch_id
-        LEFT JOIN analytics.node_clusters nc ON nf.node_id = nc.node_id AND nf.batch_id = nc.batch_id
-        LEFT JOIN analytics.node_graph_metrics ngm ON nf.node_id = ngm.node_id AND nf.batch_id = ngm.batch_id
         WHERE nf.batch_id = %s
         ORDER BY risk_score DESC
         LIMIT %s OFFSET %s;
@@ -285,16 +283,14 @@ def get_node_detail(node_id: str):
             COALESCE(nrs.risk_level, 'LOW') AS risk_level,
             COALESCE(nrs.explanation, 'Normal behavior') AS explanation,
             nrs.shap_factors,
-            COALESCE(nc.cluster_id, 0) AS cluster_id,
-            COALESCE(nc.is_noise, FALSE) AS is_noise,
-            COALESCE(ngm.degree_centrality, 0.0) AS degree_centrality,
-            COALESCE(ngm.betweenness_centrality, 0.0) AS betweenness_centrality,
-            COALESCE(ngm.closeness_centrality, 0.0) AS closeness_centrality,
-            COALESCE(ngm.community_id, 0) AS community_id
+            COALESCE(nf.community_id, 0) AS cluster_id,
+            FALSE AS is_noise,
+            COALESCE(nf.degree_centrality, 0.0) AS degree_centrality,
+            COALESCE(nf.betweenness_centrality, 0.0) AS betweenness_centrality,
+            COALESCE(nf.closeness_centrality, 0.0) AS closeness_centrality,
+            COALESCE(nf.community_id, 0) AS community_id
         FROM analytics.node_features nf
         LEFT JOIN analytics.node_risk_scores nrs ON nf.node_id = nrs.node_id AND nf.batch_id = nrs.batch_id
-        LEFT JOIN analytics.node_clusters nc ON nf.node_id = nc.node_id AND nf.batch_id = nc.batch_id
-        LEFT JOIN analytics.node_graph_metrics ngm ON nf.node_id = ngm.node_id AND nf.batch_id = ngm.batch_id
         WHERE nf.node_id = %s AND nf.batch_id = %s;
     """
     cur.execute(query, (node_id, BATCH_ID))
@@ -334,10 +330,10 @@ def get_node_detail(node_id: str):
             "incoming_connections": row[7],
             "total_connections": row[8],
             "avg_connection_duration_ms": float(row[9]),
-            "degree_centrality": float(row[23]),
-            "betweenness_centrality": float(row[24]),
-            "closeness_centrality": float(row[25]),
-            "community_id": row[26]
+            "degree_centrality": float(row[26]),
+            "betweenness_centrality": float(row[27]),
+            "closeness_centrality": float(row[28]),
+            "community_id": row[29]
         },
         "behavior": {
             "observations_as_observer": row[10],
@@ -521,11 +517,10 @@ def get_graph_data(limit_nodes: int = 150):
             nf.node_id, nf.ip, nf.country, nf.node_type,
             COALESCE(nrs.risk_score, 0.0) AS risk_score,
             COALESCE(nrs.risk_level, 'LOW') AS risk_level,
-            COALESCE(ngm.community_id, 0) AS community_id,
-            COALESCE(ngm.degree_centrality, 0.0) AS degree_centrality
+            COALESCE(nf.community_id, 0) AS community_id,
+            COALESCE(nf.degree_centrality, 0.0) AS degree_centrality
         FROM analytics.node_features nf
         LEFT JOIN analytics.node_risk_scores nrs ON nf.node_id = nrs.node_id AND nf.batch_id = nrs.batch_id
-        LEFT JOIN analytics.node_graph_metrics ngm ON nf.node_id = ngm.node_id AND nf.batch_id = ngm.batch_id
         WHERE nf.batch_id = %s
         LIMIT %s;
     """, (BATCH_ID, limit_nodes))
@@ -575,70 +570,109 @@ def get_graph_data(limit_nodes: int = 150):
 
 @app.get("/api/clusters")
 def get_clusters():
-    """Returns cluster summaries from DBSCAN."""
+    """Returns cluster summaries from DBSCAN or community aggregations from node_features."""
     conn = get_connection()
     cur = conn.cursor()
-
-    cur.execute("""
-        SELECT 
-            cluster_id, node_count, is_noise, avg_peer_degree,
-            avg_connections, avg_observer_delay_ms, top_country, top_node_type
-        FROM analytics.cluster_summaries
-        WHERE batch_id = %s
-        ORDER BY cluster_id ASC;
-    """, (BATCH_ID,))
-    rows = cur.fetchall()
-
     clusters = []
-    for r in rows:
-        clusters.append({
-            "cluster_id": r[0],
-            "node_count": r[1],
-            "is_noise": r[2],
-            "avg_peer_degree": float(r[3]) if r[3] else 0.0,
-            "avg_connections": float(r[4]) if r[4] else 0.0,
-            "avg_observer_delay_ms": float(r[5]) if r[5] else 0.0,
-            "top_country": r[6],
-            "top_node_type": r[7]
-        })
 
-    cur.close()
-    conn.close()
+    try:
+        cur.execute("""
+            SELECT 
+                cluster_id, node_count, is_noise, avg_peer_degree,
+                avg_connections, avg_observer_delay_ms, top_country, top_node_type
+            FROM analytics.cluster_summaries
+            WHERE batch_id = %s
+            ORDER BY cluster_id ASC;
+        """, (BATCH_ID,))
+        rows = cur.fetchall()
+        for r in rows:
+            clusters.append({
+                "cluster_id": r[0],
+                "node_count": r[1],
+                "is_noise": r[2],
+                "avg_peer_degree": float(r[3]) if r[3] else 0.0,
+                "avg_connections": float(r[4]) if r[4] else 0.0,
+                "avg_observer_delay_ms": float(r[5]) if r[5] else 0.0,
+                "top_country": r[6],
+                "top_node_type": r[7]
+            })
+    except Exception:
+        conn.rollback()
+        # Fallback: derive community cluster summaries from analytics.node_features
+        try:
+            cur.execute("""
+                SELECT 
+                    community_id AS cluster_id,
+                    COUNT(*) AS node_count,
+                    FALSE AS is_noise,
+                    ROUND(AVG(peer_degree), 2) AS avg_peer_degree,
+                    ROUND(AVG(total_connections), 2) AS avg_connections,
+                    ROUND(AVG(avg_observer_delay_ms), 3) AS avg_observer_delay_ms,
+                    MODE() WITHIN GROUP (ORDER BY country) AS top_country,
+                    MODE() WITHIN GROUP (ORDER BY node_type) AS top_node_type
+                FROM analytics.node_features
+                WHERE batch_id = %s
+                GROUP BY community_id
+                ORDER BY community_id ASC;
+            """, (BATCH_ID,))
+            rows = cur.fetchall()
+            for r in rows:
+                clusters.append({
+                    "cluster_id": r[0],
+                    "node_count": r[1],
+                    "is_noise": r[2],
+                    "avg_peer_degree": float(r[3]) if r[3] else 0.0,
+                    "avg_connections": float(r[4]) if r[4] else 0.0,
+                    "avg_observer_delay_ms": float(r[5]) if r[5] else 0.0,
+                    "top_country": r[6],
+                    "top_node_type": r[7]
+                })
+        except Exception:
+            conn.rollback()
+            clusters = []
+    finally:
+        cur.close()
+        conn.close()
+
     return {"clusters": clusters}
 
 
 @app.get("/api/models")
 def get_models():
-    """Returns registered ML models."""
+    """Returns registered ML models or empty list if model_registry table is absent."""
     conn = get_connection()
     cur = conn.cursor()
-
-    cur.execute("""
-        SELECT 
-            model_id, model_name, model_version, algorithm, target_entity,
-            hyperparameters, feature_names, metrics, is_production, created_at
-        FROM analytics.model_registry
-        ORDER BY created_at DESC;
-    """)
-    rows = cur.fetchall()
-
     models = []
-    for r in rows:
-        models.append({
-            "model_id": r[0],
-            "model_name": r[1],
-            "model_version": r[2],
-            "algorithm": r[3],
-            "target_entity": r[4],
-            "hyperparameters": r[5],
-            "feature_names": r[6],
-            "metrics": r[7],
-            "is_production": r[8],
-            "created_at": r[9].isoformat() if r[9] else None
-        })
 
-    cur.close()
-    conn.close()
+    try:
+        cur.execute("""
+            SELECT 
+                model_id, model_name, model_version, algorithm, target_entity,
+                hyperparameters, feature_names, metrics, is_production, created_at
+            FROM analytics.model_registry
+            ORDER BY created_at DESC;
+        """)
+        rows = cur.fetchall()
+        for r in rows:
+            models.append({
+                "model_id": r[0],
+                "model_name": r[1],
+                "model_version": r[2],
+                "algorithm": r[3],
+                "target_entity": r[4],
+                "hyperparameters": r[5],
+                "feature_names": r[6],
+                "metrics": r[7],
+                "is_production": r[8],
+                "created_at": r[9].isoformat() if r[9] else None
+            })
+    except Exception:
+        conn.rollback()
+        models = []
+    finally:
+        cur.close()
+        conn.close()
+
     return {"models": models}
 
 

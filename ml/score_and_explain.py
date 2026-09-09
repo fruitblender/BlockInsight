@@ -25,6 +25,201 @@ from database import get_connection
 BATCH_ID = 1
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
 
+ANOMALY_WEIGHT = 0.70
+DBSCAN_NOISE_WEIGHT = 0.30
+LOW_THRESHOLD = 0.30
+MEDIUM_THRESHOLD = 0.60
+HIGH_THRESHOLD = 0.80
+
+
+def _table_columns(cur, table_name):
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'analytics' AND table_name = %s;
+        """,
+        (table_name,),
+    )
+    return {row[0] for row in cur.fetchall()}
+
+
+def risk_level_for_score(score):
+    if score >= HIGH_THRESHOLD:
+        return "CRITICAL"
+    if score >= MEDIUM_THRESHOLD:
+        return "HIGH"
+    if score >= LOW_THRESHOLD:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _load_node_ml_results(conn):
+    with conn.cursor() as cur:
+        anomaly_columns = _table_columns(cur, "node_anomalies")
+        cluster_columns = _table_columns(cur, "node_clusters")
+
+    anomaly_required = {"batch_id", "node_id", "anomaly_score", "is_anomaly"}
+    cluster_required = {"batch_id", "node_id", "cluster_id", "is_noise"}
+    missing_anomaly_columns = sorted(anomaly_required - anomaly_columns)
+    missing_cluster_columns = sorted(cluster_required - cluster_columns)
+    if missing_anomaly_columns or missing_cluster_columns:
+        problems = []
+        if missing_anomaly_columns:
+            problems.append(
+                "node_anomalies missing " + ", ".join(missing_anomaly_columns)
+            )
+        if missing_cluster_columns:
+            problems.append(
+                "node_clusters missing " + ", ".join(missing_cluster_columns)
+            )
+        raise ValueError("; ".join(problems))
+
+    anomalies = pd.read_sql(
+        """
+        SELECT node_id, anomaly_score, is_anomaly
+        FROM analytics.node_anomalies
+        WHERE batch_id = %s;
+        """,
+        conn,
+        params=(BATCH_ID,),
+    )
+    clusters = pd.read_sql(
+        """
+        SELECT node_id, cluster_id, is_noise
+        FROM analytics.node_clusters
+        WHERE batch_id = %s;
+        """,
+        conn,
+        params=(BATCH_ID,),
+    )
+
+    if anomalies.empty or clusters.empty:
+        raise ValueError(
+            f"Both node_anomalies and node_clusters must contain rows for batch {BATCH_ID}."
+        )
+
+    if anomalies["node_id"].duplicated().any():
+        raise ValueError("Duplicate node IDs found in analytics.node_anomalies.")
+    if clusters["node_id"].duplicated().any():
+        raise ValueError("Duplicate node IDs found in analytics.node_clusters.")
+
+    anomaly_ids = set(anomalies["node_id"])
+    cluster_ids = set(clusters["node_id"])
+    missing_anomaly_matches = cluster_ids - anomaly_ids
+    missing_cluster_matches = anomaly_ids - cluster_ids
+    matched_count = len(anomaly_ids & cluster_ids)
+
+    print(f"Nodes in anomaly results: {len(anomalies)}")
+    print(f"Nodes in DBSCAN results: {len(clusters)}")
+    print(f"Matched nodes: {matched_count}")
+    print(f"Missing anomaly matches: {len(missing_anomaly_matches)}")
+    print(f"Missing cluster matches: {len(missing_cluster_matches)}")
+
+    if missing_anomaly_matches or missing_cluster_matches:
+        raise ValueError(
+            "Node anomaly and DBSCAN entity sets do not match; risk scores were not persisted."
+        )
+
+    anomalies["anomaly_score"] = pd.to_numeric(
+        anomalies["anomaly_score"], errors="coerce"
+    )
+    invalid_scores = anomalies["anomaly_score"].isna() | ~anomalies[
+        "anomaly_score"
+    ].between(0.0, 1.0)
+    if invalid_scores.any():
+        raise ValueError("node_anomalies contains NULL or out-of-range anomaly_score values.")
+
+    return anomalies.merge(clusters, on="node_id", how="inner", validate="one_to_one")
+
+
+def _persist_node_risk_scores(conn, scores):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE SCHEMA IF NOT EXISTS analytics;
+            DROP TABLE IF EXISTS analytics.node_risk_scores CASCADE;
+            CREATE TABLE analytics.node_risk_scores (
+                batch_id INTEGER NOT NULL,
+                node_id VARCHAR(64) NOT NULL,
+                anomaly_score NUMERIC(6, 4) NOT NULL,
+                is_anomaly BOOLEAN NOT NULL,
+                cluster_id INTEGER NOT NULL,
+                is_noise BOOLEAN NOT NULL,
+                combined_risk_score NUMERIC(6, 4) NOT NULL,
+                risk_level VARCHAR(20) NOT NULL,
+                risk_rank INTEGER NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (batch_id, node_id)
+            );
+            """
+        )
+        cur.executemany(
+            """
+            INSERT INTO analytics.node_risk_scores (
+                batch_id, node_id, anomaly_score, is_anomaly, cluster_id, is_noise,
+                combined_risk_score, risk_level, risk_rank
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+            """,
+            [
+                (
+                    BATCH_ID,
+                    row.node_id,
+                    float(row.anomaly_score),
+                    bool(row.is_anomaly),
+                    int(row.cluster_id),
+                    bool(row.is_noise),
+                    float(row.combined_risk_score),
+                    row.risk_level,
+                    int(row.risk_rank),
+                )
+                for row in scores.itertuples(index=False)
+            ],
+        )
+    conn.commit()
+
+
+def score_node_risk():
+    print("============================================================")
+    print("   STEP 5: NODE RISK SCORING")
+    print("============================================================\n")
+    print(f"ANOMALY_WEIGHT: {ANOMALY_WEIGHT}")
+    print(f"DBSCAN_NOISE_WEIGHT: {DBSCAN_NOISE_WEIGHT}")
+    print(f"Weight sum: {ANOMALY_WEIGHT + DBSCAN_NOISE_WEIGHT:.1f}\n")
+
+    conn = get_connection()
+    try:
+        scores = _load_node_ml_results(conn)
+        scores["dbscan_noise_score"] = scores["is_noise"].astype(float)
+        scores["combined_risk_score"] = (
+            ANOMALY_WEIGHT * scores["anomaly_score"]
+            + DBSCAN_NOISE_WEIGHT * scores["dbscan_noise_score"]
+        ).clip(0.0, 1.0)
+        scores["risk_level"] = scores["combined_risk_score"].apply(risk_level_for_score)
+        scores["risk_rank"] = (
+            scores["combined_risk_score"]
+            .rank(method="first", ascending=False)
+            .astype(int)
+        )
+
+        _persist_node_risk_scores(conn, scores)
+    finally:
+        conn.close()
+
+    print("\nRisk distribution:")
+    for level in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
+        print(f"  {level}: {(scores['risk_level'] == level).sum()}")
+    print(f"Minimum combined risk: {scores['combined_risk_score'].min():.4f}")
+    print(f"Maximum combined risk: {scores['combined_risk_score'].max():.4f}")
+    print(f"Average combined risk: {scores['combined_risk_score'].mean():.4f}")
+    print("Top 10 highest-risk nodes:")
+    for row in scores.nsmallest(10, "risk_rank").itertuples(index=False):
+        print(
+            f"  {row.node_id} | {row.combined_risk_score:.4f} | "
+            f"{row.risk_level} | anomaly={row.anomaly_score:.4f} | "
+            f"is_noise={row.is_noise}"
+        )
+
 
 def score_and_explain_nodes():
     print("============================================================")
@@ -34,7 +229,7 @@ def score_and_explain_nodes():
     conn = get_connection()
 
     query = """
-        SELECT 
+        SELECT
             nf.node_id,
             nf.ip,
             nf.country,
@@ -101,7 +296,7 @@ def score_and_explain_nodes():
     for idx, row in df.iterrows():
         base_score = float(row['anomaly_score']) * 65.0
         cluster_penalty = 20.0 if row['is_noise'] else 0.0
-        
+
         delay_penalty = 0.0
         if row['avg_observer_delay_ms'] > 300:
             delay_penalty += 10.0
@@ -214,7 +409,7 @@ def score_and_explain_transactions():
     conn = get_connection()
 
     query = """
-        SELECT 
+        SELECT
             tf.txid,
             tf.fee,
             tf.size,
@@ -275,7 +470,7 @@ def score_and_explain_transactions():
         # 3. Propagation anomaly (low observations or slow spread): up to 15
         base_score = float(row['anomaly_score']) * 60.0
         rarity_component = min(25.0, float(row['rarity_score']) * 25.0)
-        
+
         prop_anomaly = 0.0
         if row['total_observations'] < 3:
             prop_anomaly += 10.0
@@ -373,5 +568,107 @@ def score_and_explain_transactions():
 
 
 if __name__ == "__main__":
-    score_and_explain_nodes()
-    score_and_explain_transactions()
+    score_node_risk()
+
+    def explain_node_isolation_forest():
+        print("============================================================")
+        print("   STEP 5B: SHAP EXPLAINABILITY - NODES")
+        print("============================================================\n")
+        if not HAS_SHAP:
+            raise ImportError("The 'shap' package is required but not installed.")
+
+        conn = get_connection()
+        try:
+            feature_cols = joblib.load(MODELS_DIR / "node_feature_names.joblib")
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'analytics' AND table_name = 'node_features';"
+                )
+                available_cols = {r[0] for r in cur.fetchall()}
+
+            missing = [f for f in feature_cols if f not in available_cols]
+            if missing:
+                raise ValueError(f"analytics.node_features is missing required training features: {missing}")
+
+            imputer = joblib.load(MODELS_DIR / "node_imputer.joblib")
+            scaler = joblib.load(MODELS_DIR / "node_scaler.joblib")
+            clf = joblib.load(MODELS_DIR / "node_isolation_forest.joblib")
+
+            select_cols = ", ".join(feature_cols)
+            query = f"SELECT node_id, {select_cols} FROM analytics.node_features WHERE batch_id = %s;"
+            df = pd.read_sql(query, conn, params=(BATCH_ID,))
+
+            if df.empty:
+                raise ValueError(f"No rows found in analytics.node_features for batch {BATCH_ID}.")
+
+            numeric_data = df[feature_cols].apply(pd.to_numeric, errors="coerce")
+            numeric_data = numeric_data.replace([np.inf, -np.inf], np.nan)
+
+            imputed_data = imputer.transform(numeric_data)
+            X_scaled = scaler.transform(imputed_data)
+
+            if X_scaled.shape[1] != clf.n_features_in_:
+                raise ValueError(f"Feature dimension mismatch: {X_scaled.shape[1]} vs expected {clf.n_features_in_}")
+
+            print("Computing SHAP values for nodes...")
+            explainer = shap.TreeExplainer(clf)
+            shap_values = explainer.shap_values(X_scaled)
+
+            explanations = []
+            for idx, row in df.iterrows():
+                node_id = row["node_id"]
+                node_shap = shap_values[idx]
+                abs_shap = np.abs(node_shap)
+
+                ranks = pd.Series(abs_shap).rank(method="first", ascending=False).astype(int).values
+
+                for feat_idx, feat_name in enumerate(feature_cols):
+                    feat_val = float(imputed_data[idx, feat_idx])
+                    s_val = float(node_shap[feat_idx])
+                    abs_s_val = float(abs_shap[feat_idx])
+                    rank = int(ranks[feat_idx])
+
+                    explanations.append((
+                        BATCH_ID,
+                        node_id,
+                        feat_name,
+                        feat_val,
+                        s_val,
+                        abs_s_val,
+                        rank
+                    ))
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE SCHEMA IF NOT EXISTS analytics;
+                    CREATE TABLE IF NOT EXISTS analytics.node_explanations (
+                        batch_id INTEGER NOT NULL,
+                        node_id VARCHAR(64) NOT NULL,
+                        feature_name VARCHAR(128) NOT NULL,
+                        feature_value NUMERIC NOT NULL,
+                        shap_value NUMERIC(20, 10) NOT NULL,
+                        absolute_shap_value NUMERIC(20, 10) NOT NULL,
+                        feature_rank INTEGER NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        PRIMARY KEY (batch_id, node_id, feature_name)
+                    );
+                    DELETE FROM analytics.node_explanations WHERE batch_id = %s;
+                """, (BATCH_ID,))
+
+                insert_sql = """
+                    INSERT INTO analytics.node_explanations (
+                        batch_id, node_id, feature_name, feature_value,
+                        shap_value, absolute_shap_value, feature_rank
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """
+                cur.executemany(insert_sql, explanations)
+
+            conn.commit()
+            print(f"Persisted {len(explanations)} SHAP explanations for batch {BATCH_ID}.")
+
+        finally:
+            conn.close()
+
+    explain_node_isolation_forest()

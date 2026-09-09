@@ -13,6 +13,7 @@ def load_network_events():
 
         # Register file under existing Batch 1
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 INSERT INTO ingestion_files
@@ -35,7 +36,13 @@ def load_network_events():
         print(f"Using batch: {BATCH_ID}")
 
         # Read CSV
-        with open(CSV_FILE, "r", newline="", encoding="utf-8") as file:
+        with open(
+            CSV_FILE,
+            "r",
+            newline="",
+            encoding="utf-8"
+        ) as file:
+
             reader = csv.DictReader(file)
 
             rows = [
@@ -53,23 +60,36 @@ def load_network_events():
 
         # Insert into staging
         with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO staging.network_events_raw
-                (
-                    event_id,
-                    timestamp,
-                    event_type,
-                    node_id,
-                    peer_id,
-                    connection_id,
-                    batch_id
+
+            inserted_count = 0
+
+            for row in rows:
+
+                cur.execute(
+                    """
+                    INSERT INTO staging.network_events_raw
+                    (
+                        event_id,
+                        timestamp,
+                        event_type,
+                        node_id,
+                        peer_id,
+                        connection_id,
+                        batch_id
+                    )
+                    VALUES
+                    (
+                        %s, %s, %s, %s,
+                        %s, %s, %s
+                    )
+
+                    ON CONFLICT (event_id) DO NOTHING;
+                    """,
+                    row
                 )
-                VALUES
-                (%s, %s, %s, %s, %s, %s, %s);
-                """,
-                rows
-            )
+
+                if cur.rowcount > 0:
+                    inserted_count += 1
 
             # Mark file completed
             cur.execute(
@@ -81,12 +101,26 @@ def load_network_events():
                     row_count = %s
                 WHERE file_id = %s;
                 """,
-                (len(rows), file_id)
+                (
+                    inserted_count,
+                    file_id
+                )
             )
 
         conn.commit()
 
-        print(f"Successfully loaded {len(rows)} network events.")
+        skipped_count = len(rows) - inserted_count
+
+        print(
+            f"Successfully loaded "
+            f"{inserted_count} new network events."
+        )
+
+        print(
+            f"Skipped "
+            f"{skipped_count} existing network events."
+        )
+
         print(f"File completed under batch {BATCH_ID}.")
 
     except Exception as e:

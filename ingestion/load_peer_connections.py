@@ -13,6 +13,7 @@ def load_peer_connections():
 
         # Register this file under the existing batch
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 INSERT INTO ingestion_files
@@ -35,7 +36,13 @@ def load_peer_connections():
         print(f"Using batch: {BATCH_ID}")
 
         # Read CSV
-        with open(CSV_FILE, "r", newline="", encoding="utf-8") as file:
+        with open(
+            CSV_FILE,
+            "r",
+            newline="",
+            encoding="utf-8"
+        ) as file:
+
             reader = csv.DictReader(file)
 
             rows = [
@@ -57,27 +64,37 @@ def load_peer_connections():
 
         # Insert into staging
         with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO staging.peer_connections_raw
-                (
-                    connection_id,
-                    timestamp_start,
-                    timestamp_end,
-                    src_node_id,
-                    dst_node_id,
-                    src_ip,
-                    dst_ip,
-                    src_port,
-                    dst_port,
-                    direction,
-                    batch_id
+
+            inserted_count = 0
+
+            for row in rows:
+
+                cur.execute(
+                    """
+                    INSERT INTO staging.peer_connections_raw
+                    (
+                        connection_id,
+                        timestamp_start,
+                        timestamp_end,
+                        src_node_id,
+                        dst_node_id,
+                        src_ip,
+                        dst_ip,
+                        src_port,
+                        dst_port,
+                        direction,
+                        batch_id
+                    )
+                    VALUES
+                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+
+                    ON CONFLICT (connection_id) DO NOTHING;
+                    """,
+                    row
                 )
-                VALUES
-                (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-                """,
-                rows
-            )
+
+                if cur.rowcount > 0:
+                    inserted_count += 1
 
             # Mark file completed
             cur.execute(
@@ -89,12 +106,25 @@ def load_peer_connections():
                     row_count = %s
                 WHERE file_id = %s;
                 """,
-                (len(rows), file_id)
+                (
+                    inserted_count,
+                    file_id
+                )
             )
 
         conn.commit()
 
-        print(f"Successfully loaded {len(rows)} peer connections.")
+        skipped_count = len(rows) - inserted_count
+
+        print(
+            f"Successfully loaded "
+            f"{inserted_count} new peer connections."
+        )
+
+        print(
+            f"Skipped {skipped_count} existing peer connections."
+        )
+
         print(f"File completed under batch {BATCH_ID}.")
 
     except Exception as e:

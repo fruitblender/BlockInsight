@@ -113,6 +113,18 @@ def build_node_features():
             ip_diversity
                 INTEGER NOT NULL DEFAULT 0,
 
+            degree_centrality
+                DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+
+            betweenness_centrality
+                DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+
+            closeness_centrality
+                DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+
+            community_id
+                INTEGER NOT NULL DEFAULT 0,
+
             created_at TIMESTAMPTZ DEFAULT NOW(),
 
             PRIMARY KEY (batch_id, node_id)

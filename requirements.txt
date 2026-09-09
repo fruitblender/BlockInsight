@@ -1,0 +1,10 @@
+pandas
+numpy
+scikit-learn
+joblib
+shap
+psycopg
+python-dotenv
+networkx
+fastapi
+pydantic
