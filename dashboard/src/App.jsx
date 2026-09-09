@@ -1,106 +1,27 @@
-import React, { useState, useEffect } from 'react';
-import Sidebar from './components/Sidebar';
-import OverviewView from './views/OverviewView';
-import AlertsView from './views/AlertsView';
-import NodesView from './views/NodesView';
-import TransactionsView from './views/TransactionsView';
-import GraphView from './views/GraphView';
-import ModelsView from './views/ModelsView';
+import { useEffect, useState } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { Bell, CircleHelp, Menu } from 'lucide-react'
+import Sidebar from './components/Sidebar'
+import { api } from './api/client'
+import { Alerts, Clusters, NodeDrawer, Nodes, Operations, Overview, Models, Topology, TransactionDrawer, Transactions } from './pages'
 
-export default function App() {
-  const [activeView, setActiveView] = useState('overview');
-  const [selectedAlert, setSelectedAlert] = useState(null);
-  const [selectedNodeId, setSelectedNodeId] = useState(null);
-  const [selectedTxid, setSelectedTxid] = useState(null);
-  const [counts, setCounts] = useState({ alerts: 8, nodes: 150, txs: 500 });
+const pageNames = { '/': 'Executive overview', '/alerts': 'Threat alerts', '/nodes': 'Node profiles', '/transactions': 'Transaction traffic', '/topology': 'Network topology', '/models': 'ML model registry', '/clusters': 'Cluster analysis', '/operations': 'Pipeline operations' }
+
+function AppFrame() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [counts, setCounts] = useState(null)
+  const [apiState, setApiState] = useState('checking')
+  const [nodeId, setNodeId] = useState(null)
+  const [txid, setTxid] = useState(null)
+  const [mobileOpen, setMobileOpen] = useState(false)
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/overview')
-      .then(res => res.json())
-      .then(data => {
-        if (data) {
-          setCounts({
-            alerts: data.alerts?.total || 8,
-            nodes: data.network?.total_nodes || 150,
-            txs: data.network?.total_transactions || 500
-          });
-        }
-      })
-      .catch(err => console.error("Error fetching header counts:", err));
-  }, []);
+    api.get('/api/overview').then(data => { setCounts(data); setApiState('online') }).catch(() => setApiState('offline'))
+  }, [])
 
-  const handleSelectAlert = (alert) => {
-    setSelectedAlert(alert);
-    if (activeView !== 'alerts') {
-      setActiveView('alerts');
-    }
-  };
-
-  const handleSelectNode = (nodeId) => {
-    setSelectedNodeId(nodeId);
-    if (activeView !== 'nodes') {
-      setActiveView('nodes');
-    }
-  };
-
-  const handleSelectTx = (txid) => {
-    setSelectedTxid(txid);
-    if (activeView !== 'transactions') {
-      setActiveView('transactions');
-    }
-  };
-
-  return (
-    <div className="app-container">
-      <Sidebar
-        activeView={activeView}
-        setActiveView={setActiveView}
-        counts={counts}
-      />
-
-      <main className="main-content">
-        {activeView === 'overview' && (
-          <OverviewView
-            onSelectAlert={handleSelectAlert}
-            onSelectNode={handleSelectNode}
-            onSelectTx={handleSelectTx}
-          />
-        )}
-
-        {activeView === 'alerts' && (
-          <AlertsView
-            selectedAlert={selectedAlert}
-            onSelectAlert={setSelectedAlert}
-            onCloseDetail={() => setSelectedAlert(null)}
-          />
-        )}
-
-        {activeView === 'nodes' && (
-          <NodesView
-            selectedNodeId={selectedNodeId}
-            onSelectNode={setSelectedNodeId}
-            onCloseModal={() => setSelectedNodeId(null)}
-          />
-        )}
-
-        {activeView === 'transactions' && (
-          <TransactionsView
-            selectedTxid={selectedTxid}
-            onSelectTx={setSelectedTxid}
-            onCloseModal={() => setSelectedTxid(null)}
-          />
-        )}
-
-        {activeView === 'graph' && (
-          <GraphView
-            onSelectNode={handleSelectNode}
-          />
-        )}
-
-        {activeView === 'models' && (
-          <ModelsView />
-        )}
-      </main>
-    </div>
-  );
+  const navigateTo = path => { navigate(path); setMobileOpen(false) }
+  return <div className="app-shell"><Sidebar currentPath={location.pathname} navigate={navigateTo} counts={counts} mobileOpen={mobileOpen} closeMobile={() => setMobileOpen(false)} /><main className="main-content"><header className="topbar"><button className="mobile-menu icon-button" onClick={() => setMobileOpen(true)}><Menu size={18} /></button><div className="crumb"><span>BlockInsight</span><b>/</b>{pageNames[location.pathname] || 'Investigation'}</div><div className="topbar-actions"><div className={`api-indicator api-${apiState}`}><i />{apiState === 'online' ? 'API connected' : apiState === 'offline' ? 'API unavailable' : 'Checking API'}</div><button className="icon-button" aria-label="Help"><CircleHelp size={17} /></button><button className="icon-button" aria-label="Notifications"><Bell size={17} /></button></div></header><div className="content-wrap">{location.pathname === '/' ? counts ? <Overview apiOverview={counts} /> : <div className="state-block"><span>Querying live telemetry...</span></div> : <Routes><Route path="/alerts" element={<Alerts />} /><Route path="/nodes" element={<Nodes onSelectNode={setNodeId} />} /><Route path="/transactions" element={<Transactions onSelectTx={setTxid} />} /><Route path="/topology" element={<Topology onSelectNode={setNodeId} />} /><Route path="/models" element={<Models />} /><Route path="/clusters" element={<Clusters />} /><Route path="/operations" element={<Operations />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes>}</div></main>{nodeId && <NodeDrawer nodeId={nodeId} onClose={() => setNodeId(null)} />}{txid && <TransactionDrawer txid={txid} onClose={() => setTxid(null)} />}</div>
 }
+
+export default function App() { return <BrowserRouter><AppFrame /></BrowserRouter> }

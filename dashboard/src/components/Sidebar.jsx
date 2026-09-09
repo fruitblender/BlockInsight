@@ -1,67 +1,11 @@
-import React from 'react';
-import { Activity, ShieldAlert, Network, ArrowLeftRight, GitBranch, Cpu, Database } from 'lucide-react';
+import { Activity, ArrowLeftRight, BrainCircuit, Database, GitBranch, Layers3, Server, ShieldAlert, SlidersHorizontal, X } from 'lucide-react'
 
-export default function Sidebar({ activeView, setActiveView, counts }) {
-  const navItems = [
-    { id: 'overview', label: 'Executive Overview', icon: Activity },
-    { id: 'alerts', label: 'Threat Alerts', icon: ShieldAlert, badge: counts?.alerts || 0 },
-    { id: 'nodes', label: 'Node Profiles', icon: Network, badge: counts?.nodes || 150 },
-    { id: 'transactions', label: 'Transaction Traffic', icon: ArrowLeftRight, badge: counts?.txs || 500 },
-    { id: 'graph', label: 'Network Link Graph', icon: GitBranch },
-    { id: 'models', label: 'Model Registry', icon: Cpu },
-  ];
+export default function Sidebar({ currentPath, navigate, counts, mobileOpen, closeMobile }) {
+  const groups = [
+    { label: 'Monitor', items: [{ path: '/', label: 'Executive overview', icon: Activity }, { path: '/alerts', label: 'Threat alerts', icon: ShieldAlert, badge: counts?.alerts?.total }, { path: '/nodes', label: 'Node profiles', icon: Server, badge: counts?.network?.total_nodes }, { path: '/transactions', label: 'Transaction traffic', icon: ArrowLeftRight, badge: counts?.network?.total_transactions }] },
+    { label: 'Investigate', items: [{ path: '/topology', label: 'Network topology', icon: GitBranch }, { path: '/clusters', label: 'Cluster analysis', icon: Layers3 }] },
+    { label: 'Govern', items: [{ path: '/models', label: 'ML model registry', icon: BrainCircuit }, { path: '/operations', label: 'Pipeline operations', icon: SlidersHorizontal }] },
+  ]
 
-  return (
-    <aside className="sidebar">
-      <div className="sidebar-header">
-        <div className="logo-badge">₿</div>
-        <div className="logo-text">
-          <h1>ChainWatch</h1>
-          <p>BTC Traffic Monitor</p>
-        </div>
-      </div>
-
-      <div className="nav-links">
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          const isActive = activeView === item.id;
-          return (
-            <button
-              key={item.id}
-              className={`nav-item ${isActive ? 'active' : ''}`}
-              onClick={() => setActiveView(item.id)}
-            >
-              <Icon size={18} />
-              <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>
-              {item.badge !== undefined && (
-                <span style={{
-                  fontSize: '0.72rem',
-                  padding: '2px 6px',
-                  borderRadius: '10px',
-                  background: isActive ? 'rgba(6, 182, 212, 0.25)' : 'rgba(255, 255, 255, 0.08)',
-                  color: isActive ? '#38bdf8' : '#94a3b8',
-                  fontWeight: 600
-                }}>
-                  {item.badge}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="sidebar-footer">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-          <span>Offline Node</span>
-          <span className="status-pill">
-            <span className="status-dot"></span> Online
-          </span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Database size={13} color="#64748b" />
-          <span>PostgreSQL · Batch #1</span>
-        </div>
-      </div>
-    </aside>
-  );
+  return <aside className={`sidebar ${mobileOpen ? 'sidebar-open' : ''}`}><div className="sidebar-header"><div className="brand-mark">₿</div><div className="logo-text"><h1>BlockInsight</h1><p>Network intelligence</p></div><button className="mobile-close icon-button" onClick={closeMobile}><X size={18} /></button></div><div className="sidebar-context"><span className="context-kicker">Analysis workspace</span><strong>Bitcoin P2P telemetry</strong><span className="context-batch">{counts ? `Batch #${counts.batch_id}` : 'Batch unavailable'}</span></div><nav className="nav-links">{groups.map(group => <div className="nav-group" key={group.label}><span className="nav-label">{group.label}</span>{group.items.map(item => { const Icon = item.icon; const active = currentPath === item.path; return <button className={`nav-item ${active ? 'active' : ''}`} key={item.path} onClick={() => navigate(item.path)}><Icon size={17} /><span>{item.label}</span>{item.badge !== undefined && <b>{item.badge}</b>}</button> })}</div>)}</nav><div className="sidebar-footer"><div className="footer-line"><Database size={14} /><span>PostgreSQL analytics</span></div><div className="footer-note">Presentation layer · live API state shown above</div></div></aside>
 }
