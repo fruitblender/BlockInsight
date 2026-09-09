@@ -1,117 +1,182 @@
 """
-Correlation Stage C: Verify Observation -> Peer Node Link
-Confirms that core.transaction_observations correctly connects both observer_id and peer_id to core.nodes.
+Correlation Stage C:
+Verify the observation -> peer node relationship.
+
+Confirms that transaction_observations.peer_id
+correctly connects to nodes.node_id.
 """
+
 import sys
 from pathlib import Path
 
-# Allow importing database.py from the ingestion directory
 sys.path.append(str(Path(__file__).resolve().parents[1] / "ingestion"))
+
 from database import get_connection
 
-BATCH_ID = 1
 
 def run_stage_c():
+
     conn = get_connection()
-    cur = conn.cursor()
 
-    print("============================================================")
-    print(f"     CORRELATION STAGE C: OBSERVATION -> PEER NODE (BATCH {BATCH_ID})")
-    print("============================================================\n")
+    try:
+        with conn.cursor() as cur:
 
-    # 1. Total counts in the 3-way joined view
-    cur.execute("""
-        SELECT
-            COUNT(*) AS total_joined_observations,
-            COUNT(DISTINCT o.observer_id) AS distinct_observers,
-            COUNT(DISTINCT o.peer_id) AS distinct_peers
-        FROM core.transaction_observations o
-        JOIN core.nodes observer
-            ON o.observer_id = observer.node_id
-        JOIN core.nodes peer
-            ON o.peer_id = peer.node_id
-        WHERE o.batch_id = %s;
-    """, (BATCH_ID,))
-    joined_obs, distinct_obs, distinct_peers = cur.fetchone()
+            print("=" * 60)
+            print("CORRELATION STAGE C: OBSERVATION -> PEER NODE")
+            print("=" * 60)
 
-    print(f"Total observations joined (Obs -> Observer & Peer): {joined_obs} / 3940")
-    print(f"Distinct observer nodes                              : {distinct_obs}")
-    print(f"Distinct propagating peer nodes                      : {distinct_peers}")
-    print()
+            # 1. Total observations
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM core.transaction_observations;
+            """)
+            total_observations = cur.fetchone()[0]
 
-    # 2. Node types of the propagating peers
-    print("--- Peer Node Types ---")
-    cur.execute("""
-        SELECT
-            peer.node_type,
-            COUNT(DISTINCT o.peer_id) AS unique_peers,
-            COUNT(*) AS total_propagations
-        FROM core.transaction_observations o
-        JOIN core.nodes peer
-            ON o.peer_id = peer.node_id
-        WHERE o.batch_id = %s
-        GROUP BY peer.node_type
-        ORDER BY total_propagations DESC;
-    """, (BATCH_ID,))
+            # 2. Observations with a valid peer
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM core.transaction_observations o
+                JOIN core.nodes peer
+                    ON o.peer_id = peer.node_id;
+            """)
+            linked_observations = cur.fetchone()[0]
 
-    for r in cur.fetchall():
-        print(f"  Type: {r[0]:20s} | Unique Peers: {r[1]:3d} | Observations Sent: {r[2]:4d}")
-    print()
+            # 3. Observations with NULL peer_id
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM core.transaction_observations
+                WHERE peer_id IS NULL;
+            """)
+            null_peers = cur.fetchone()[0]
 
-    # 3. Top 5 propagating peers
-    print("--- Top 5 Propagating Peers ---")
-    cur.execute("""
-        SELECT
-            o.peer_id,
-            peer.ip,
-            peer.country,
-            peer.asn,
-            peer.node_type,
-            COUNT(*) AS count
-        FROM core.transaction_observations o
-        JOIN core.nodes peer
-            ON o.peer_id = peer.node_id
-        WHERE o.batch_id = %s
-        GROUP BY o.peer_id, peer.ip, peer.country, peer.asn, peer.node_type
-        ORDER BY count DESC
-        LIMIT 5;
-    """, (BATCH_ID,))
+            # 4. Distinct peer nodes
+            cur.execute("""
+                SELECT COUNT(DISTINCT o.peer_id)
+                FROM core.transaction_observations o
+                JOIN core.nodes peer
+                    ON o.peer_id = peer.node_id;
+            """)
+            distinct_peers = cur.fetchone()[0]
 
-    for r in cur.fetchall():
-        print(f"  Peer: {r[0]} | IP: {r[1]:15s} | Country: {r[2]} | ASN: {r[3]:10s} | Type: {r[4]:12s} | Sent: {r[5]}")
+            print()
+            print(f"Total observations          : {total_observations}")
+            print(f"Linked to valid peer nodes  : {linked_observations}")
+            print(f"NULL peer IDs               : {null_peers}")
+            print(f"Distinct peer nodes         : {distinct_peers}")
 
-    print("\n--- Sample Complete 3-Way Correlation Record ---")
-    cur.execute("""
-        SELECT
-            o.txid,
-            o.sequence_number,
-            o.timestamp AS obs_time,
-            o.observer_id,
-            obs.country AS obs_country,
-            o.peer_id,
-            peer.country AS peer_country,
-            peer.node_type AS peer_type,
-            o.message_type,
-            o.propagation_delay_ms
-        FROM core.transaction_observations o
-        JOIN core.nodes obs
-            ON o.observer_id = obs.node_id
-        JOIN core.nodes peer
-            ON o.peer_id = peer.node_id
-        WHERE o.batch_id = %s
-        ORDER BY o.txid, o.sequence_number
-        LIMIT 3;
-    """, (BATCH_ID,))
+            # 5. Verification
+            print()
 
-    for r in cur.fetchall():
-        print(f"  TX: {r[0][:12]}... | Seq: {r[1]} | Delay: {r[9]}ms | Observer: {r[3]} ({r[4]}) <- Peer: {r[5]} ({r[6]}, {r[7]}) via {r[8]}")
+            if total_observations == linked_observations:
+                print("Peer Node Join: PASSED")
+                print("100% of observations have a valid peer node.")
+            else:
+                print("Peer Node Join: NOT COMPLETE")
+                print(
+                    f"{total_observations - linked_observations} "
+                    "observations do not have a valid peer node."
+                )
 
-    print("\n============================================================")
-    print("               STAGE C VERIFICATION COMPLETE                ")
-    print("============================================================")
+            # 6. Peer node types
+            print()
+            print("--- Peer Node Types ---")
 
-    cur.close()
-    conn.close()
+            cur.execute("""
+                SELECT
+                    peer.node_type,
+                    COUNT(DISTINCT o.peer_id) AS unique_peers,
+                    COUNT(*) AS observation_count
+                FROM core.transaction_observations o
+                JOIN core.nodes peer
+                    ON o.peer_id = peer.node_id
+                GROUP BY peer.node_type
+                ORDER BY observation_count DESC;
+            """)
+
+            for row in cur.fetchall():
+                print(
+                    f"Type={row[0]} | "
+                    f"Unique peers={row[1]} | "
+                    f"Observations={row[2]}"
+                )
+
+            # 7. Top peer nodes
+            print()
+            print("--- Top 5 Peer Nodes ---")
+
+            cur.execute("""
+                SELECT
+                    o.peer_id,
+                    peer.ip,
+                    peer.country,
+                    peer.asn,
+                    peer.node_type,
+                    COUNT(*) AS observation_count
+                FROM core.transaction_observations o
+                JOIN core.nodes peer
+                    ON o.peer_id = peer.node_id
+                GROUP BY
+                    o.peer_id,
+                    peer.ip,
+                    peer.country,
+                    peer.asn,
+                    peer.node_type
+                ORDER BY observation_count DESC
+                LIMIT 5;
+            """)
+
+            for row in cur.fetchall():
+                print(
+                    f"Peer={row[0]} | "
+                    f"IP={row[1]} | "
+                    f"Country={row[2]} | "
+                    f"ASN={row[3]} | "
+                    f"Type={row[4]} | "
+                    f"Observations={row[5]}"
+                )
+
+            # 8. Sample observer -> peer relationship
+            print()
+            print("--- Sample Observer -> Peer Records ---")
+
+            cur.execute("""
+                SELECT
+                    o.txid,
+                    o.sequence_number,
+                    o.observer_id,
+                    observer.country,
+                    o.peer_id,
+                    peer.country,
+                    peer.node_type,
+                    o.message_type,
+                    o.propagation_delay_ms
+                FROM core.transaction_observations o
+                JOIN core.nodes observer
+                    ON o.observer_id = observer.node_id
+                JOIN core.nodes peer
+                    ON o.peer_id = peer.node_id
+                ORDER BY o.txid, o.sequence_number
+                LIMIT 5;
+            """)
+
+            for row in cur.fetchall():
+                print(
+                    f"TX={row[0][:12]}... | "
+                    f"Seq={row[1]} | "
+                    f"Observer={row[2]} ({row[3]}) | "
+                    f"Peer={row[4]} ({row[5]}, {row[6]}) | "
+                    f"Message={row[7]} | "
+                    f"Delay={row[8]}ms"
+                )
+
+            print()
+            print("=" * 60)
+            print("STAGE C COMPLETE")
+            print("=" * 60)
+
+    finally:
+        conn.close()
+
 
 if __name__ == "__main__":
     run_stage_c()

@@ -1,89 +1,147 @@
 """
-Correlation Stage B: Verify Observation -> Observer Node Link
-Confirms that core.transaction_observations correctly connects to core.nodes on observer_id.
+Correlation Stage B:
+Verify the observation -> observer node relationship.
+
+Confirms that transaction_observations.observer_id
+correctly connects to nodes.node_id.
 """
+
 import sys
 from pathlib import Path
 
-# Allow importing database.py from the ingestion directory
 sys.path.append(str(Path(__file__).resolve().parents[1] / "ingestion"))
+
 from database import get_connection
 
-BATCH_ID = 1
 
 def run_stage_b():
+
     conn = get_connection()
-    cur = conn.cursor()
 
-    print("============================================================")
-    print(f"   CORRELATION STAGE B: OBSERVATION -> OBSERVER NODE (BATCH {BATCH_ID})")
-    print("============================================================\n")
+    try:
+        with conn.cursor() as cur:
 
-    # 1. Total counts in the joined view
-    cur.execute("""
-        SELECT
-            COUNT(*) AS total_joined_observations,
-            COUNT(DISTINCT o.observer_id) AS distinct_observers
-        FROM core.transaction_observations o
-        JOIN core.nodes n
-            ON o.observer_id = n.node_id
-        WHERE o.batch_id = %s;
-    """, (BATCH_ID,))
-    joined_obs, distinct_observers = cur.fetchone()
+            print("=" * 60)
+            print("CORRELATION STAGE B: OBSERVATION -> OBSERVER NODE")
+            print("=" * 60)
 
-    # Total nodes in core.nodes
-    cur.execute("SELECT COUNT(*) FROM core.nodes WHERE batch_id = %s;", (BATCH_ID,))
-    total_nodes = cur.fetchone()[0]
+            # 1. Total observations
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM core.transaction_observations;
+            """)
+            total_observations = cur.fetchone()[0]
 
-    print(f"Total observations joined to observer node: {joined_obs} / 3940")
-    print(f"Distinct observer nodes active             : {distinct_observers} / {total_nodes} total nodes")
-    print()
+            # 2. Observations linked to valid nodes
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM core.transaction_observations o
+                JOIN core.nodes n
+                    ON o.observer_id = n.node_id;
+            """)
+            linked_observations = cur.fetchone()[0]
 
-    # 2. Top observer nodes by volume
-    print("--- Top 5 Observer Nodes by Observation Volume ---")
-    cur.execute("""
-        SELECT
-            o.observer_id,
-            n.ip,
-            n.country,
-            n.asn,
-            n.node_type,
-            COUNT(*) AS obs_count
-        FROM core.transaction_observations o
-        JOIN core.nodes n
-            ON o.observer_id = n.node_id
-        WHERE o.batch_id = %s
-        GROUP BY o.observer_id, n.ip, n.country, n.asn, n.node_type
-        ORDER BY obs_count DESC
-        LIMIT 5;
-    """, (BATCH_ID,))
+            # 3. Distinct observer nodes
+            cur.execute("""
+                SELECT COUNT(DISTINCT o.observer_id)
+                FROM core.transaction_observations o
+                JOIN core.nodes n
+                    ON o.observer_id = n.node_id;
+            """)
+            distinct_observers = cur.fetchone()[0]
 
-    for r in cur.fetchall():
-        print(f"  Node: {r[0]} | IP: {r[1]:15s} | Country: {r[2]} | ASN: {r[3]:10s} | Type: {r[4]:10s} | Observations: {r[5]}")
+            # 4. Total nodes
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM core.nodes;
+            """)
+            total_nodes = cur.fetchone()[0]
 
-    print("\n--- Geographic Distribution of Observers ---")
-    cur.execute("""
-        SELECT
-            n.country,
-            COUNT(DISTINCT o.observer_id) AS observer_count,
-            COUNT(*) AS observation_count
-        FROM core.transaction_observations o
-        JOIN core.nodes n
-            ON o.observer_id = n.node_id
-        WHERE o.batch_id = %s
-        GROUP BY n.country
-        ORDER BY observation_count DESC;
-    """, (BATCH_ID,))
+            print()
+            print(f"Total observations          : {total_observations}")
+            print(f"Linked to valid nodes       : {linked_observations}")
+            print(f"Distinct observer nodes     : {distinct_observers}")
+            print(f"Total nodes                 : {total_nodes}")
 
-    for r in cur.fetchall():
-        print(f"  Country: {r[0]:4s} | Observers: {r[1]:3d} | Total Observations: {r[2]:4d}")
+            # 5. Verification
+            print()
 
-    print("\n============================================================")
-    print("               STAGE B VERIFICATION COMPLETE                ")
-    print("============================================================")
+            if total_observations == linked_observations:
+                print("Observer Join: PASSED")
+                print("100% of observations have a valid observer node.")
+            else:
+                print("Observer Join: FAILED")
+                print(
+                    f"{total_observations - linked_observations} "
+                    "observations have no matching observer node."
+                )
 
-    cur.close()
-    conn.close()
+            # 6. Top observer nodes
+            print()
+            print("--- Top 5 Observer Nodes ---")
+
+            cur.execute("""
+                SELECT
+                    o.observer_id,
+                    n.ip,
+                    n.country,
+                    n.asn,
+                    n.node_type,
+                    COUNT(*) AS observation_count
+                FROM core.transaction_observations o
+                JOIN core.nodes n
+                    ON o.observer_id = n.node_id
+                GROUP BY
+                    o.observer_id,
+                    n.ip,
+                    n.country,
+                    n.asn,
+                    n.node_type
+                ORDER BY observation_count DESC
+                LIMIT 5;
+            """)
+
+            for row in cur.fetchall():
+                print(
+                    f"Node={row[0]} | "
+                    f"IP={row[1]} | "
+                    f"Country={row[2]} | "
+                    f"ASN={row[3]} | "
+                    f"Type={row[4]} | "
+                    f"Observations={row[5]}"
+                )
+
+            # 7. Geographic distribution
+            print()
+            print("--- Geographic Distribution ---")
+
+            cur.execute("""
+                SELECT
+                    n.country,
+                    COUNT(DISTINCT o.observer_id) AS observer_count,
+                    COUNT(*) AS observation_count
+                FROM core.transaction_observations o
+                JOIN core.nodes n
+                    ON o.observer_id = n.node_id
+                GROUP BY n.country
+                ORDER BY observation_count DESC;
+            """)
+
+            for row in cur.fetchall():
+                print(
+                    f"Country={row[0]} | "
+                    f"Observers={row[1]} | "
+                    f"Observations={row[2]}"
+                )
+
+            print()
+            print("=" * 60)
+            print("STAGE B COMPLETE")
+            print("=" * 60)
+
+    finally:
+        conn.close()
+
 
 if __name__ == "__main__":
     run_stage_b()

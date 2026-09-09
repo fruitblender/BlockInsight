@@ -1,4 +1,4 @@
-from database import get_connection
+from ingestion.database import get_connection
 
 
 try:
